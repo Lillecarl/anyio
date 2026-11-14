@@ -3499,3 +3499,79 @@ async def test_interrupted_by_close(socket_type: str) -> None:
             await wait_all_tasks_blocked()
             notify_closing(a_sock)
             a_sock.close()
+
+
+class _FailingListener(SocketListener):
+    """Fails accept() with each error in turn, then hands out one stream."""
+
+    def __init__(self, errors: list[Exception], stream: SocketStream) -> None:
+        self.errors = errors
+        self.stream: SocketStream | None = stream
+
+    @property
+    def _raw_socket(self) -> socket.socket:
+        raise NotImplementedError
+
+    async def accept(self) -> SocketStream:
+        await checkpoint()
+        if self.errors:
+            raise self.errors.pop(0)
+
+        if self.stream is None:
+            await sleep_forever()
+
+        stream, self.stream = self.stream, None
+        assert stream is not None
+        return stream
+
+    async def aclose(self) -> None:
+        pass
+
+
+async def test_serve_survives_running_out_of_descriptors(
+    caplog: LogCaptureFixture,
+) -> None:
+    # The asyncio TCP listener raises the OSError as is, the others wrap it
+    broken = BrokenResourceError()
+    broken.__cause__ = OSError(errno.ENFILE, "Too many open files in system")
+    stream = cast(SocketStream, object())
+    errors: list[Exception] = [OSError(errno.EMFILE, "Too many open files"), broken]
+    listener = _FailingListener(errors, stream)
+    served: list[SocketStream] = []
+    handled = Event()
+
+    async def handler(accepted: SocketStream) -> None:
+        served.append(accepted)
+        handled.set()
+
+    with fail_after(5):
+        async with create_task_group() as tg:
+            tg.start_soon(listener.serve, handler)
+            await handled.wait()
+            tg.cancel_scope.cancel()
+
+    assert served == [stream]
+    # Debug mode makes asyncio log slow callbacks too, so look at this logger only
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "anyio.abc._sockets"
+    ] == [
+        f"accept() raised {errno.errorcode[code]} ({os.strerror(code)}); retrying in "
+        f"0.1 seconds"
+        for code in (errno.EMFILE, errno.ENFILE)
+    ]
+
+
+async def test_serve_raises_other_accept_errors() -> None:
+    listener = _FailingListener(
+        [OSError(errno.EBADF, "Bad file descriptor")], cast(SocketStream, object())
+    )
+
+    async def handler(accepted: SocketStream) -> None:
+        pass
+
+    with fail_after(5), pytest.raises(ExceptionGroup) as exc:
+        await listener.serve(handler)
+
+    assert exc.group_contains(OSError, match="Bad file descriptor")
