@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import errno
+import logging
+import os
 import socket
 from abc import abstractmethod
 from collections.abc import Callable, Collection, Mapping
@@ -27,6 +29,12 @@ SockAddrType: TypeAlias = IPSockAddrType | str
 UDPPacketType: TypeAlias = tuple[bytes, IPSockAddrType]
 UNIXDatagramPacketType: TypeAlias = tuple[bytes, str]
 T_Retval = TypeVar("T_Retval")
+
+# Errors from accept() that mean the process or the system is out of resources
+_ACCEPT_CAPACITY_ERRNOS = frozenset(
+    {errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.ENOBUFS}
+)
+_ACCEPT_RETRY_DELAY = 0.1
 
 
 def _validate_socket(
@@ -272,15 +280,45 @@ class SocketListener(Listener[SocketStream], _SocketProvider):
         handler: Callable[[SocketStream], Any],
         task_group: TaskGroup | None = None,
     ) -> None:
-        from .. import create_task_group
+        """
+        Accept incoming connections as they come in and start tasks to handle them.
+
+        If accepting a connection fails because the process or the system has run out
+        of file descriptors or memory (``EMFILE``, ``ENFILE``, ``ENOMEM`` or
+        ``ENOBUFS``), the error is logged and the listener tries again after 0.1
+        seconds. Any other error is raised.
+
+        :param handler: a callable that will be used to handle each accepted connection
+        :param task_group: the task group that will be used to start tasks for handling
+            each accepted connection (if omitted, an ad-hoc task group will be created)
+        """
+        from .. import BrokenResourceError, create_task_group, sleep
 
         async with AsyncExitStack() as stack:
             if task_group is None:
                 task_group = await stack.enter_async_context(create_task_group())
 
             while True:
-                stream = await self.accept()
-                task_group.start_soon(handler, stream)
+                try:
+                    stream = await self.accept()
+                except (OSError, BrokenResourceError) as exc:
+                    error = exc if isinstance(exc, OSError) else exc.__cause__
+                    if (
+                        not isinstance(error, OSError)
+                        or error.errno not in _ACCEPT_CAPACITY_ERRNOS
+                    ):
+                        raise
+
+                    logging.getLogger(__name__).error(
+                        "accept() raised %s (%s); retrying in %s seconds",
+                        errno.errorcode[error.errno],
+                        os.strerror(error.errno),
+                        _ACCEPT_RETRY_DELAY,
+                        exc_info=exc,
+                    )
+                    await sleep(_ACCEPT_RETRY_DELAY)
+                else:
+                    task_group.start_soon(handler, stream)
 
 
 class UDPSocket(UnreliableObjectStream[UDPPacketType], _SocketProvider):

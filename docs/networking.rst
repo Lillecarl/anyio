@@ -41,6 +41,10 @@ To receive incoming TCP connections, you first create a TCP listener with
 
 .. literalinclude:: snippets/networking/tcp_server.py
 
+If accepting a connection fails because the process or the system has run out of file
+descriptors or memory, :meth:`~.abc.SocketListener.serve` logs the error and tries
+again after 0.1 seconds instead of raising it.
+
 See the section on :ref:`TLS` for more information.
 
 Working with UNIX sockets
