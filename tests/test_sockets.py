@@ -1596,6 +1596,29 @@ class TestUNIXListener:
                 TypedAttributeLookupError, listener.extra, SocketAttribute.remote_port
             )
 
+    async def test_stale_socket_removed_outside_event_loop(
+        self, socket_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        if str(socket_path).startswith("\0"):
+            pytest.skip("an abstract socket has no file to remove")
+
+        stale = socket.socket(socket.AF_UNIX)
+        stale.bind(str(socket_path))
+        stale.close()
+        unlinked_in: list[int] = []
+        real_unlink = os.unlink
+
+        def unlink(path: str, *args: Any, **kwargs: Any) -> None:
+            unlinked_in.append(threading.get_ident())
+            real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", unlink)
+        async with await create_unix_listener(socket_path):
+            pass
+
+        assert unlinked_in
+        assert threading.get_ident() not in unlinked_in
+
     async def test_accept(self, socket_path_or_str: Path | str) -> None:
         async with await create_unix_listener(socket_path_or_str) as listener:
             client = socket.socket(socket.AF_UNIX)
