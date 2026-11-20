@@ -879,6 +879,23 @@ def convert_ipv6_sockaddr(
         return sockaddr
 
 
+def _remove_stale_socket(path: str) -> None:
+    # Copied from pathlib...
+    try:
+        stat_result = os.stat(path)
+    except OSError as e:
+        if e.errno not in (
+            errno.ENOENT,
+            errno.ENOTDIR,
+            errno.EBADF,
+            errno.ELOOP,
+        ):
+            raise
+    else:
+        if stat.S_ISSOCK(stat_result.st_mode):
+            os.unlink(path)
+
+
 async def setup_unix_local_socket(
     path: None | str | bytes | PathLike[Any],
     mode: int | None,
@@ -901,20 +918,9 @@ async def setup_unix_local_socket(
 
         # Linux abstract namespace sockets aren't backed by a concrete file so skip stat call
         if not path_str.startswith("\0"):
-            # Copied from pathlib...
-            try:
-                stat_result = os.stat(path)
-            except OSError as e:
-                if e.errno not in (
-                    errno.ENOENT,
-                    errno.ENOTDIR,
-                    errno.EBADF,
-                    errno.ELOOP,
-                ):
-                    raise
-            else:
-                if stat.S_ISSOCK(stat_result.st_mode):
-                    os.unlink(path)
+            await to_thread.run_sync(
+                _remove_stale_socket, path_str, abandon_on_cancel=True
+            )
     else:
         path_str = None
 
