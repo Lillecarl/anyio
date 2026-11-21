@@ -924,13 +924,16 @@ async def setup_unix_local_socket(
     if path_str is not None:
         try:
             # On Linux, bind() creates the socket file with the mode of the unbound
-            # socket. Other platforms don't allow fchmod() on sockets, so the mode has
-            # to be set after binding, without following symlinks.
+            # socket, minus the umask. Setting it before binding means the file is
+            # never more permissive than requested; the chmod() after binding then
+            # restores the bits that the umask removed. Other platforms don't allow
+            # fchmod() on sockets, so there the mode is only set after binding. The
+            # chmod() refuses to follow a symlink.
             if mode is not None and sys.platform == "linux":
                 os.fchmod(raw_socket.fileno(), mode)
 
             await to_thread.run_sync(raw_socket.bind, path_str, abandon_on_cancel=True)
-            if mode is not None and sys.platform != "linux":
+            if mode is not None:
                 await to_thread.run_sync(
                     partial(os.chmod, path_str, mode, follow_symlinks=False),
                     abandon_on_cancel=True,

@@ -1983,6 +1983,18 @@ class TestUNIXListener:
                 TypedAttributeLookupError, listener.extra, SocketAttribute.remote_port
             )
 
+    async def test_mode_ignores_umask(self) -> None:
+        old_umask = os.umask(0o022)
+        try:
+            with tempfile.TemporaryDirectory() as path:
+                socket_path = Path(path) / "socket"
+                async with await create_unix_listener(socket_path, mode=0o666):
+                    mode = stat.S_IMODE(socket_path.stat(follow_symlinks=False).st_mode)
+        finally:
+            os.umask(old_umask)
+
+        assert mode == 0o666
+
     async def test_accept(self, socket_path_or_str: Path | str) -> None:
         async with await create_unix_listener(socket_path_or_str) as listener:
             client = socket.socket(socket.AF_UNIX)
@@ -3064,6 +3076,7 @@ class TestUNIXDatagramSocket:
         [
             pytest.param(None, 0o755, id="default"),
             pytest.param(0o644, 0o644, id="explicit"),
+            pytest.param(0o666, 0o666, id="explicit-wider-than-umask"),
         ],
     )
     async def test_local_mode(self, local_mode: int | None, expected_mode: int) -> None:
